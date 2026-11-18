@@ -1,0 +1,209 @@
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  View, Text, TextInput, TouchableOpacity, ScrollView,
+  StyleSheet, SafeAreaView, ActivityIndicator, KeyboardAvoidingView,
+  Platform, Alert
+} from 'react-native';
+
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const MODEL = 'llama-3.3-70b-versatile';
+
+type Msg = { role: 'user' | 'assistant'; content: string };
+
+export default function App() {
+  const [key, setKey] = useState('');
+  const [showSettings, setShowSettings] = useState(true);
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [abort, setAbort] = useState<AbortController | null>(null);
+  const scrollRef = useRef<ScrollView>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollToEnd({ animated: true });
+  }, [messages]);
+
+  async function send() {
+    if (!key.trim()) { Alert.alert('先填 API Key', '去 ⚙️ 設定填 Groq Key'); return; }
+    if (!input.trim() || loading) return;
+
+    const next: Msg[] = [...messages, { role: 'user', content: input }];
+    setMessages([...next, { role: 'assistant', content: '' }]);
+    setInput('');
+    setLoading(true);
+
+    const ac = new AbortController();
+    setAbort(ac);
+
+    try {
+      const res = await fetch(GROQ_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          stream: true,
+          messages: next.map(m => ({ role: m.role, content: m.content })),
+        }),
+        signal: ac.signal,
+      });
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let acc = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t.startsWith('data:')) continue;
+          const json = t.slice(5).trim();
+          if (json === '[DONE]') continue;
+          try {
+            const obj = JSON.parse(json);
+            const delta = obj.choices?.[0]?.delta?.content || '';
+            if (delta) {
+              acc += delta;
+              setMessages(ms => {
+                const cp = [...ms];
+                cp[cp.length - 1] = { role: 'assistant', content: acc };
+                return cp;
+              });
+            }
+          } catch {}
+        }
+      }
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        setMessages(ms => {
+          const cp = [...ms];
+          cp[cp.length - 1] = { role: 'assistant', content: '⚠️ 出錯：' + String(e?.message || e) };
+          return cp;
+        });
+      }
+    } finally {
+      setLoading(false);
+      setAbort(null);
+    }
+  }
+
+  function stop() {
+    abort?.abort();
+    setLoading(false);
+  }
+
+  if (showSettings) {
+    return (
+      <SafeAreaView style={styles.flex}>
+        <View style={styles.pad}>
+          <Text style={styles.h1}>⚙️ 諾瓦 AI 設定</Text>
+          <Text style={styles.tip}>貼上 Groq API Key（console.groq.com 免費申請）</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="gsk-xxxxxxxx"
+            placeholderTextColor="#888"
+            value={key}
+            onChangeText={setKey}
+            autoCapitalize="none"
+            secureTextEntry
+          />
+          <TouchableOpacity
+            style={[styles.btn, !key.trim() && styles.btnOff]}
+            disabled={!key.trim()}
+            onPress={() => setShowSettings(false)}
+          >
+            <Text style={styles.btnText}>儲存並開始</Text>
+          </TouchableOpacity>
+          <Text style={styles.tip2}>Snack 版只含主聊天介面，Widget/Siri/Watch 需開發版</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.flex}>
+      <View style={styles.topbar}>
+        <Text style={styles.title}>✨ 諾瓦 AI</Text>
+        <TouchableOpacity onPress={() => setShowSettings(true)}>
+          <Text style={styles.gear}>⚙️</Text>
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView ref={scrollRef} style={styles.flex} contentContainerStyle={styles.msgs}>
+        {messages.length === 0 && <Text style={styles.empty}>輸入第一句話開始對話…</Text>}
+        {messages.map((m, i) => (
+          <View key={i} style={[styles.bubble, m.role === 'user' ? styles.me : styles.ai]}>
+            <Text style={styles.bubbleText}>{m.content}</Text>
+          </View>
+        ))}
+        {loading && messages[messages.length - 1]?.content === '' && (
+          <View style={[styles.bubble, styles.ai]}>
+            <ActivityIndicator size="small" color="#888" />
+          </View>
+        )}
+      </ScrollView>
+
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.composer}
+      >
+        <TextInput
+          style={styles.inputFlex}
+          placeholder="問點什麼…"
+          placeholderTextColor="#888"
+          value={input}
+          onChangeText={setInput}
+          onSubmitEditing={loading ? stop : send}
+          blurOnSubmit={false}
+        />
+        <TouchableOpacity style={styles.send} onPress={loading ? stop : send}>
+          <Text style={styles.sendText}>{loading ? '⏹' : '➤'}</Text>
+        </TouchableOpacity>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  flex: { flex: 1 },
+  pad: { flex: 1, padding: 24, justifyContent: 'center' },
+  h1: { fontSize: 24, fontWeight: '700', marginBottom: 16, color: '#111' },
+  tip: { color: '#666', marginBottom: 8 },
+  tip2: { color: '#999', fontSize: 12, marginTop: 16 },
+  input: {
+    borderWidth: 1, borderColor: '#ddd', borderRadius: 12,
+    padding: 14, fontSize: 16, color: '#111', background: '#fff',
+  },
+  inputFlex: {
+    flex: 1, borderWidth: 1, borderColor: '#ddd', borderRadius: 20,
+    paddingHorizontal: 16, paddingVertical: 10, fontSize: 16, color: '#111', background: '#fff',
+  },
+  btn: { marginTop: 20, background: '#111', padding: 14, borderRadius: 12, alignItems: 'center' },
+  btnOff: { opacity: 0.4 },
+  btnText: { color: '#fff', fontWeight: '600' },
+  topbar: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    padding: 14, borderBottomWidth: 1, borderColor: '#eee',
+  },
+  title: { fontSize: 18, fontWeight: '700', color: '#111' },
+  gear: { fontSize: 20 },
+  msgs: { padding: 16, gap: 10 },
+  empty: { color: '#aaa', textAlign: 'center', marginTop: 40 },
+  bubble: { maxWidth: '80%', padding: 12, borderRadius: 16 },
+  me: { alignSelf: 'flex-end', background: '#111', },
+  ai: { alignSelf: 'flex-start', background: '#f0f0f0' },
+  bubbleText: { color: '#111', fontSize: 15, lineHeight: 22 },
+  composer: {
+    flexDirection: 'row', gap: 8, padding: 12,
+    borderTopWidth: 1, borderColor: '#eee', alignItems: 'center',
+  },
+  send: { background: '#111', width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  sendText: { color: '#fff', fontSize: 18 },
+});
